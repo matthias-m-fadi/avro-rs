@@ -337,9 +337,13 @@ impl UnionSchema {
                 return Err(Error::GetNestedUnion);
             }
             let kind = SchemaKind::from(schema);
-            if vindex.insert(kind, i).is_some() {
-                return Err(Error::GetUnionDuplicate);
-            }
+            // TODO: readd duplicate check.
+            //       As written, this incorrectly identifies two different record types as identical just
+            //       they are both records
+            //if vindex.insert(kind, i).is_some() {
+            //    // panic!();
+            //    return Err(Error::GetUnionDuplicate);
+            //}
         }
         Ok(UnionSchema {
             schemas,
