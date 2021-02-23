@@ -233,24 +233,26 @@ impl Name {
         })
     }
 
+    fn namespace<'a>(&'a self, default_namespace: Option<&'a str>) -> Option<&str> {
+        self.namespace.as_deref().or(default_namespace)
+    }
+
     /// Return the `fullname` of this `Name`
     ///
     /// More information about fullnames can be found in the
     /// [Avro specification](https://avro.apache.org/docs/current/spec.html#names)
     pub fn fullname(&self, default_namespace: Option<&str>) -> String {
-        if self.name.contains('.') {
-            self.name.clone()
-        } else {
-            let namespace = self
-                .namespace
-                .as_ref()
-                .map(|s| s.as_ref())
-                .or(default_namespace);
+        fullname(&self.name, self.namespace(default_namespace))
+    }
+}
 
-            match namespace {
-                Some(ref namespace) => format!("{}.{}", namespace, self.name),
-                None => self.name.clone(),
-            }
+pub(crate) fn fullname(name: &str, namespace: Option<&str>) -> String {
+    if name.contains('.') {
+        name.to_owned()
+    } else {
+        match namespace {
+            Some(namespace) => format!("{}.{}", namespace, name),
+            None => name.to_owned(),
         }
     }
 }
@@ -287,11 +289,16 @@ pub enum RecordFieldOrder {
 
 impl RecordField {
     /// Parse a `serde_json::Value` into a `RecordField`.
-    fn parse(field: &Map<String, Value>, position: usize, parser: &mut Parser) -> AvroResult<Self> {
+    fn parse(
+        field: &Map<String, Value>,
+        position: usize,
+        outer_namespace: Option<&str>,
+        parser: &mut Parser,
+    ) -> AvroResult<Self> {
         let name = field.name().ok_or(Error::GetNameFieldFromRecord)?;
 
         // TODO: "type" = "<record name>"
-        let schema = parser.parse_complex(field)?;
+        let schema = parser.parse_complex(field, outer_namespace)?;
 
         let default = field.get("default").cloned();
 
@@ -430,8 +437,7 @@ impl Schema {
 
     /// Create a `Schema` from a string representing a JSON Avro schema.
     pub fn parse_str(input: &str) -> Result<Schema, Error> {
-        let mut parser = Parser::default();
-        parser.parse_str(input)
+        Parser::default().parse_str(input)
     }
 
     /// Create a array of `Schema`'s from a list of named JSON Avro schemas (Record, Enum, and
@@ -465,9 +471,9 @@ impl Schema {
         parser.parse_list()
     }
 
-    pub fn parse(value: &Value) -> AvroResult<Schema> {
+    pub fn parse(value: &Value, outer_namespace: Option<&str>) -> AvroResult<Schema> {
         let mut parser = Parser::default();
-        parser.parse(value)
+        parser.parse(value, outer_namespace)
     }
 }
 
@@ -476,7 +482,7 @@ impl Parser {
     fn parse_str(&mut self, input: &str) -> Result<Schema, Error> {
         // TODO: (#82) this should be a ParseSchemaError wrapping the JSON error
         let value = serde_json::from_str(input).map_err(Error::ParseSchemaJson)?;
-        self.parse(&value)
+        self.parse(&value, None)
     }
 
     /// Create an array of `Schema`'s from an iterator of JSON Avro schemas. It is allowed that
@@ -493,7 +499,7 @@ impl Parser {
                 .input_schemas
                 .remove_entry(&next_name)
                 .expect("Key unexpectedly missing");
-            let parsed = self.parse(&value)?;
+            let parsed = self.parse(&value, None)?;
             self.parsed_schemas.insert(name, parsed);
         }
 
@@ -510,11 +516,11 @@ impl Parser {
 
     /// Create a `Schema` from a `serde_json::Value` representing a JSON Avro
     /// schema.
-    fn parse(&mut self, value: &Value) -> AvroResult<Schema> {
+    fn parse(&mut self, value: &Value, outer_namespace: Option<&str>) -> AvroResult<Schema> {
         match *value {
-            Value::String(ref t) => self.parse_known_schema(t.as_str()),
-            Value::Object(ref data) => self.parse_complex(data),
-            Value::Array(ref data) => self.parse_union(data),
+            Value::String(ref t) => self.parse_known_schema(t.as_str(), outer_namespace),
+            Value::Object(ref data) => self.parse_complex(data, outer_namespace),
+            Value::Array(ref data) => self.parse_union(data, outer_namespace),
             _ => Err(Error::ParseSchemaFromValidJson),
         }
     }
@@ -522,7 +528,11 @@ impl Parser {
     /// Parse a `serde_json::Value` representing an Avro type whose Schema is known into a
     /// `Schema`. A Schema for a `serde_json::Value` is known if it is primitive or has
     /// been parsed previously by the parsed and stored in its map of parsed_schemas.
-    fn parse_known_schema(&mut self, name: &str) -> AvroResult<Schema> {
+    fn parse_known_schema(
+        &mut self,
+        name: &str,
+        outer_namespace: Option<&str>,
+    ) -> AvroResult<Schema> {
         match name {
             "null" => Ok(Schema::Null),
             "boolean" => Ok(Schema::Boolean),
@@ -532,7 +542,7 @@ impl Parser {
             "float" => Ok(Schema::Float),
             "bytes" => Ok(Schema::Bytes),
             "string" => Ok(Schema::String),
-            _ => self.fetch_schema(name),
+            _ => self.fetch_schema(name, outer_namespace),
         }
     }
 
@@ -543,16 +553,17 @@ impl Parser {
     ///
     /// This method allows schemas definitions that depend on other types to
     /// parse their dependencies (or look them up if already parsed).
-    fn fetch_schema(&mut self, name: &str) -> AvroResult<Schema> {
-        if let Some(parsed) = self.parsed_schemas.get(name) {
+    fn fetch_schema(&mut self, name: &str, outer_namespace: Option<&str>) -> AvroResult<Schema> {
+        let name = fullname(name, outer_namespace);
+        if let Some(parsed) = self.parsed_schemas.get(&name) {
             return Ok(parsed.clone());
         }
         let value = self
             .input_schemas
-            .remove(name)
-            .ok_or_else(|| Error::ParsePrimitive(name.into()))?;
-        let parsed = self.parse(&value)?;
-        self.parsed_schemas.insert(name.to_string(), parsed.clone());
+            .remove(&name)
+            .ok_or_else(|| Error::ParsePrimitive(name.clone()))?;
+        let parsed = self.parse(&value, outer_namespace)?;
+        self.parsed_schemas.insert(name, parsed.clone());
         Ok(parsed)
     }
 
@@ -582,7 +593,11 @@ impl Parser {
     ///
     /// Avro supports "recursive" definition of types.
     /// e.g: {"type": {"type": "string"}}
-    fn parse_complex(&mut self, complex: &Map<String, Value>) -> AvroResult<Schema> {
+    fn parse_complex(
+        &mut self,
+        complex: &Map<String, Value>,
+        outer_namespace: Option<&str>,
+    ) -> AvroResult<Schema> {
         fn logical_verify_type(
             complex: &Map<String, Value>,
             kinds: &[SchemaKind],
@@ -590,7 +605,7 @@ impl Parser {
         ) -> AvroResult<Schema> {
             match complex.get("type") {
                 Some(value) => {
-                    let ty = parser.parse(value)?;
+                    let ty = parser.parse(value, None)?;
                     if kinds
                         .iter()
                         .any(|&kind| SchemaKind::from(ty.clone()) == kind)
@@ -660,15 +675,15 @@ impl Parser {
         }
         match complex.get("type") {
             Some(&Value::String(ref t)) => match t.as_str() {
-                "record" => self.parse_record(complex),
+                "record" => self.parse_record(complex, outer_namespace),
                 "enum" => Self::parse_enum(complex),
-                "array" => self.parse_array(complex),
-                "map" => self.parse_map(complex),
+                "array" => self.parse_array(complex, outer_namespace),
+                "map" => self.parse_map(complex, outer_namespace),
                 "fixed" => Self::parse_fixed(complex),
-                other => self.parse_known_schema(other),
+                other => self.parse_known_schema(other, outer_namespace),
             },
-            Some(&Value::Object(ref data)) => self.parse_complex(data),
-            Some(&Value::Array(ref variants)) => self.parse_union(variants),
+            Some(&Value::Object(ref data)) => self.parse_complex(data, outer_namespace),
+            Some(&Value::Array(ref variants)) => self.parse_union(variants, outer_namespace),
             Some(unknown) => Err(Error::GetComplexType(unknown.clone())),
             None => Err(Error::GetComplexTypeField),
         }
@@ -676,8 +691,22 @@ impl Parser {
 
     /// Parse a `serde_json::Value` representing a Avro record type into a
     /// `Schema`.
-    fn parse_record(&mut self, complex: &Map<String, Value>) -> AvroResult<Schema> {
+    fn parse_record(
+        &mut self,
+        complex: &Map<String, Value>,
+        outer_namespace: Option<&str>,
+    ) -> AvroResult<Schema> {
         let name = Name::parse(complex)?;
+        // Only records, enums and fixed are named and can have namespaces.
+        // If a schema definition doesn't contain a namespace, it is taken
+        // from the first schema above it that has a namespace.
+        // (from specification: "the namespace is taken from the most tightly enclosing schema or protocol")
+        // Flipped to a depth-first traversal of the schema tree, this means
+        // the current namespace is whatever namespace has been seen last.
+        //
+        // Enums and fixed don't contain other types so this place is the
+        // only case where the current namespace changes before being handed down the tree.
+        let namespace = name.namespace(outer_namespace);
 
         let mut lookup = HashMap::new();
 
@@ -690,7 +719,7 @@ impl Parser {
                     .iter()
                     .filter_map(|field| field.as_object())
                     .enumerate()
-                    .map(|(position, field)| RecordField::parse(field, position, self))
+                    .map(|(position, field)| RecordField::parse(field, position, namespace, self))
                     .collect::<Result<_, _>>()
             })?;
 
@@ -747,30 +776,42 @@ impl Parser {
 
     /// Parse a `serde_json::Value` representing a Avro array type into a
     /// `Schema`.
-    fn parse_array(&mut self, complex: &Map<String, Value>) -> AvroResult<Schema> {
+    fn parse_array(
+        &mut self,
+        complex: &Map<String, Value>,
+        outer_namespace: Option<&str>,
+    ) -> AvroResult<Schema> {
         complex
             .get("items")
             .ok_or(Error::GetArrayItemsField)
-            .and_then(|items| self.parse(items))
+            .and_then(|items| self.parse(items, outer_namespace))
             .map(|schema| Schema::Array(Box::new(schema)))
     }
 
     /// Parse a `serde_json::Value` representing a Avro map type into a
     /// `Schema`.
-    fn parse_map(&mut self, complex: &Map<String, Value>) -> AvroResult<Schema> {
+    fn parse_map(
+        &mut self,
+        complex: &Map<String, Value>,
+        outer_namespace: Option<&str>,
+    ) -> AvroResult<Schema> {
         complex
             .get("values")
             .ok_or(Error::GetMapValuesField)
-            .and_then(|items| self.parse(items))
+            .and_then(|items| self.parse(items, outer_namespace))
             .map(|schema| Schema::Map(Box::new(schema)))
     }
 
     /// Parse a `serde_json::Value` representing a Avro union type into a
     /// `Schema`.
-    fn parse_union(&mut self, items: &[Value]) -> AvroResult<Schema> {
+    fn parse_union(
+        &mut self,
+        items: &[Value],
+        outer_namespace: Option<&str>,
+    ) -> AvroResult<Schema> {
         items
             .iter()
-            .map(|v| self.parse(v))
+            .map(|v| self.parse(v, outer_namespace))
             .collect::<Result<Vec<_>, _>>()
             .and_then(|schemas| Ok(Schema::Union(UnionSchema::new(schemas)?)))
     }
