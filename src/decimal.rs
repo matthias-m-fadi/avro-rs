@@ -7,8 +7,7 @@ pub struct Decimal {
     len: usize,
 }
 
-// We only care about value equality, not byte length. Can two equal `BigInt`s have two different
-// byte lengths?
+// We only care about value equality, not byte length.
 impl PartialEq for Decimal {
     fn eq(&self, other: &Self) -> bool {
         self.value == other.value
@@ -20,8 +19,10 @@ impl Decimal {
         self.len
     }
 
-    fn to_vec(&self) -> AvroResult<Vec<u8>> {
-        self.to_sign_extended_bytes_with_len(self.len)
+    fn to_vec(&self) -> Vec<u8> {
+        // self.len is the byte length this decimal was deserialized from.
+        // It is therefore guaranteed that it can be serialized into it again.
+        self.to_sign_extended_bytes_with_len(self.len).unwrap()
     }
 
     pub(crate) fn to_sign_extended_bytes_with_len(&self, len: usize) -> AvroResult<Vec<u8>> {
@@ -38,10 +39,8 @@ impl Decimal {
     }
 }
 
-impl std::convert::TryFrom<&Decimal> for Vec<u8> {
-    type Error = Error;
-
-    fn try_from(decimal: &Decimal) -> Result<Self, Self::Error> {
+impl std::convert::From<&Decimal> for Vec<u8> {
+    fn from(decimal: &Decimal) -> Self {
         decimal.to_vec()
     }
 }

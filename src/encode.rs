@@ -49,13 +49,6 @@ pub fn encode_ref(value: &Value, schema: &Schema, buffer: &mut Vec<u8>) {
             Schema::Decimal { inner, .. } => match *inner.clone() {
                 Schema::Fixed { size, .. } => {
                     let bytes = decimal.to_sign_extended_bytes_with_len(size).unwrap();
-                    let num_bytes = bytes.len();
-                    if num_bytes != size {
-                        panic!(
-                            "signed decimal bytes length {} not equal to fixed schema size {}",
-                            num_bytes, size
-                        );
-                    }
                     encode(&Value::Fixed(size, bytes), inner, buffer)
                 }
                 Schema::Bytes => encode(&Value::Bytes(decimal.try_into().unwrap()), inner, buffer),

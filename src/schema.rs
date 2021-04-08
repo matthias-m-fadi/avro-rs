@@ -122,6 +122,62 @@ pub enum Schema {
     Duration,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum SchemaType {
+    Null,
+    Boolean,
+    Int,
+    Long,
+    Float,
+    Double,
+    Bytes,
+    String,
+    Array,
+    Map,
+    Union,
+    Record(Name),
+    Enum(Name),
+    Fixed(Name),
+    Decimal,
+    Uuid,
+    Date,
+    TimeMillis,
+    TimeMicros,
+    TimestampMillis,
+    TimestampMicros,
+    Duration,
+}
+
+impl From<&Schema> for SchemaType {
+    fn from(schema: &Schema) -> Self {
+        use SchemaType::*;
+        match schema {
+            Schema::Null => Null,
+            Schema::Boolean => Boolean,
+            Schema::Int => Int,
+            Schema::Long => Long,
+            Schema::Float => Float,
+            Schema::Double => Double,
+            Schema::Bytes => Bytes,
+            Schema::String => String,
+            Schema::Array(_) => Array,
+            Schema::Map(_) => Map,
+            Schema::Union(_) => Union,
+            Schema::Record { name, .. } => Record(name.clone()),
+            Schema::Enum { name, .. } => Enum(name.clone()),
+            Schema::Fixed { name, .. } => Fixed(name.clone()),
+            Schema::Decimal { .. } => Decimal,
+            Schema::Uuid => Uuid,
+            Schema::Date => Date,
+            Schema::TimeMillis => TimeMillis,
+            Schema::TimeMicros => TimeMicros,
+            Schema::TimestampMillis => TimestampMillis,
+            Schema::TimestampMicros => TimestampMicros,
+            Schema::Duration => Duration,
+        }
+    }
+}
+
 impl PartialEq for Schema {
     /// Assess equality of two `Schema` based on [Parsing Canonical Form].
     ///
@@ -145,6 +201,36 @@ impl SchemaKind {
                 | SchemaKind::Bytes
                 | SchemaKind::String,
         )
+    }
+}
+
+impl<'a> From<&'a types::Value> for SchemaType {
+    fn from(value: &'a types::Value) -> Self {
+        use crate::types::Value;
+        match value {
+            Value::Null => Self::Null,
+            Value::Boolean(_) => Self::Boolean,
+            Value::Int(_) => Self::Int,
+            Value::Long(_) => Self::Long,
+            Value::Float(_) => Self::Float,
+            Value::Double(_) => Self::Double,
+            Value::Bytes(_) => Self::Bytes,
+            Value::String(_) => Self::String,
+            Value::Array(_) => Self::Array,
+            Value::Map(_) => Self::Map,
+            Value::Union(_) => Self::Union,
+            Value::Record(_) => todo!(),   // Self::Record,
+            Value::Enum(_, _) => todo!(),  // Self::Enum,
+            Value::Fixed(_, _) => todo!(), // Self::Fixed,
+            Value::Decimal { .. } => Self::Decimal,
+            Value::Uuid(_) => Self::Uuid,
+            Value::Date(_) => Self::Date,
+            Value::TimeMillis(_) => Self::TimeMillis,
+            Value::TimeMicros(_) => Self::TimeMicros,
+            Value::TimestampMillis(_) => Self::TimestampMillis,
+            Value::TimestampMicros(_) => Self::TimestampMicros,
+            Value::Duration { .. } => Self::Duration,
+        }
     }
 }
 
@@ -188,11 +274,20 @@ impl<'a> From<&'a types::Value> for SchemaKind {
 ///
 /// More information about schema names can be found in the
 /// [Avro specification](https://avro.apache.org/docs/current/spec.html#names)
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+// FIXME: equality is defined on fullnames!
+#[derive(Clone, Debug, Eq, Hash, Deserialize)]
 pub struct Name {
     pub name: String,
     pub namespace: Option<String>,
     pub aliases: Option<Vec<String>>,
+}
+
+impl PartialEq<Name> for Name {
+    fn eq(&self, other: &Name) -> bool {
+        let fullname = self.fullname(None);
+        let fullname_other = other.fullname(None);
+        fullname == fullname_other
+    }
 }
 
 /// Represents documentation for complex Avro schemas.
@@ -233,7 +328,7 @@ impl Name {
         })
     }
 
-    fn namespace<'a>(&'a self, default_namespace: Option<&'a str>) -> Option<&str> {
+    pub fn namespace<'a>(&'a self, default_namespace: Option<&'a str>) -> Option<&str> {
         self.namespace.as_deref().or(default_namespace)
     }
 
@@ -324,9 +419,7 @@ pub struct UnionSchema {
     pub(crate) schemas: Vec<Schema>,
     // Used to ensure uniqueness of schema inputs, and provide constant time finding of the
     // schema index given a value.
-    // **NOTE** that this approach does not work for named types, and will have to be modified
-    // to support that. A simple solution is to also keep a mapping of the names used.
-    variant_index: HashMap<SchemaKind, usize>,
+    variant_index: HashMap<SchemaType, usize>,
 }
 
 impl UnionSchema {
@@ -336,14 +429,10 @@ impl UnionSchema {
             if let Schema::Union(_) = schema {
                 return Err(Error::GetNestedUnion);
             }
-            let kind = SchemaKind::from(schema);
-            // TODO: readd duplicate check.
-            //       As written, this incorrectly identifies two different record types as identical just
-            //       they are both records
-            //if vindex.insert(kind, i).is_some() {
-            //    // panic!();
-            //    return Err(Error::GetUnionDuplicate);
-            //}
+            let kind = SchemaType::from(schema);
+            if vindex.insert(kind, i).is_some() {
+                return Err(Error::GetUnionDuplicate);
+            }
         }
         Ok(UnionSchema {
             schemas,
@@ -358,13 +447,13 @@ impl UnionSchema {
 
     /// Returns true if the first variant of this `UnionSchema` is `Null`.
     pub fn is_nullable(&self) -> bool {
-        !self.schemas.is_empty() && self.schemas[0] == Schema::Null
+        self.schemas.get(0) == Some(&Schema::Null)
     }
 
     /// Optionally returns a reference to the schema matched by this value, as well as its position
     /// within this union.
     pub fn find_schema(&self, value: &types::Value) -> Option<(usize, &Schema)> {
-        let type_index = &SchemaKind::from(value);
+        let type_index = &SchemaType::from(value);
         if let Some(&i) = self.variant_index.get(type_index) {
             // fast path
             Some((i, &self.schemas[i]))
