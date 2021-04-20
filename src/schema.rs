@@ -233,7 +233,7 @@ impl Name {
         })
     }
 
-    fn namespace<'a>(&'a self, default_namespace: Option<&'a str>) -> Option<&str> {
+    pub fn namespace<'a>(&'a self, default_namespace: Option<&'a str>) -> Option<&str> {
         self.namespace.as_deref().or(default_namespace)
     }
 
